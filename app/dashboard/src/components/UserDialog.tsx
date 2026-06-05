@@ -39,7 +39,6 @@ import {
 import { zodResolver } from "@hookform/resolvers/zod";
 import { resetStrategy } from "constants/UserSettings";
 import { FilterUsageType, useDashboard } from "contexts/DashboardContext";
-import useGetUser from "hooks/useGetUser";
 import dayjs from "dayjs";
 import { FC, useEffect, useState } from "react";
 import ReactApexChart from "react-apexcharts";
@@ -231,7 +230,6 @@ export const UserDialog: FC<UserDialogProps> = () => {
   const [error, setError] = useState<string | null>("");
   const toast = useToast();
   const { t, i18n } = useTranslation();
-  const { userData } = useGetUser();
 
   const { colorMode } = useColorMode();
 
@@ -260,29 +258,6 @@ export const UserDialog: FC<UserDialogProps> = () => {
     control: form.control,
     name: ["data_limit", "status"],
   });
-
-  // Quota helpers for non-sudo admins with a quota limit
-  const adminQuotaLimit = userData?.creation_quota_bytes ?? null;
-  const adminAllocated = userData?.allocated_quota_bytes ?? 0;
-  const remainingQuotaBytes =
-    adminQuotaLimit !== null ? Math.max(0, adminQuotaLimit - adminAllocated) : null;
-  // When editing, exclude the current user's allocation from the "used" total
-  const editingUserLimit =
-    editingUser && editingUser.data_limit ? editingUser.data_limit : 0;
-  const effectiveRemainingBytes =
-    remainingQuotaBytes !== null
-      ? remainingQuotaBytes + editingUserLimit
-      : null;
-  // Convert to GB for display
-  const remainingQuotaGB =
-    effectiveRemainingBytes !== null
-      ? effectiveRemainingBytes / 1073741824
-      : null;
-
-  // Check if the entered data_limit (in GB) exceeds remaining quota
-  const dataLimitGB = dataLimit ? parseFloat(String(dataLimit)) : 0;
-  const quotaExceeded =
-    remainingQuotaGB !== null && dataLimitGB > 0 && dataLimitGB > remainingQuotaGB;
 
   const usageTitle = t("userDialog.total");
   const [usage, setUsage] = useState(createUsageConfig(colorMode, usageTitle));
@@ -541,7 +516,7 @@ export const UserDialog: FC<UserDialogProps> = () => {
                           </FormControl>
                         )}
                       </Flex>
-                      <FormControl mb={"10px"} isInvalid={quotaExceeded}>
+                      <FormControl mb={"10px"}>
                         <FormLabel>{t("userDialog.dataLimit")}</FormLabel>
                         <Controller
                           control={form.control}
@@ -556,34 +531,13 @@ export const UserDialog: FC<UserDialogProps> = () => {
                                 onChange={field.onChange}
                                 disabled={disabled}
                                 error={
-                                  quotaExceeded
-                                    ? t(
-                                        "quota.exceeds",
-                                        `Exceeds your remaining quota of ${remainingQuotaGB!.toFixed(2)} GB`
-                                      )
-                                    : form.formState.errors.data_limit?.message
+                                  form.formState.errors.data_limit?.message
                                 }
                                 value={field.value ? String(field.value) : ""}
                               />
                             );
                           }}
                         />
-                        {remainingQuotaGB !== null && !quotaExceeded && (
-                          <FormHelperText fontSize="xs" color="gray.500">
-                            {t(
-                              "quota.remainingHint",
-                              `Remaining capacity: ${remainingQuotaGB.toFixed(2)} GB`
-                            )}
-                          </FormHelperText>
-                        )}
-                        {adminQuotaLimit !== null && (
-                          <FormHelperText fontSize="xs" color="orange.400">
-                            {t(
-                              "quota.noUnlimitedUsers",
-                              "Unlimited data (0 GB) is not allowed for your account."
-                            )}
-                          </FormHelperText>
-                        )}
                       </FormControl>
                       <Collapse
                         in={!!(dataLimit && dataLimit > 0)}

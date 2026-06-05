@@ -6,7 +6,6 @@ from passlib.context import CryptContext
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.db import Session, crud, get_db
-from app.models.quota import AdminQuotaLogType  # noqa: re-exported for convenience
 from app.utils.jwt import get_admin_payload
 from config import SUDOERS
 
@@ -25,12 +24,9 @@ class Admin(BaseModel):
     telegram_id: Optional[int] = None
     discord_webhook: Optional[str] = None
     users_usage: Optional[int] = None
-    # Quota fields — None means unlimited
-    creation_quota_bytes: Optional[int] = None
-    allocated_quota_bytes: int = 0
     model_config = ConfigDict(from_attributes=True)
 
-    @field_validator("users_usage", "creation_quota_bytes", "allocated_quota_bytes", mode='before')
+    @field_validator("users_usage",  mode='before')
     def cast_to_int(cls, v):
         if v is None:  # Allow None values
             return v
@@ -97,7 +93,6 @@ class AdminCreate(Admin):
     password: str
     telegram_id: Optional[int] = None
     discord_webhook: Optional[str] = None
-    # creation_quota_bytes inherited from Admin (None = unlimited)
 
     @property
     def hashed_password(self):
@@ -116,8 +111,6 @@ class AdminModify(BaseModel):
     is_sudo: bool
     telegram_id: Optional[int] = None
     discord_webhook: Optional[str] = None
-    # Use sentinel to distinguish "not sent" from "explicitly set to None"
-    creation_quota_bytes: Optional[int] = -1  # -1 = not provided (leave unchanged)
 
     @property
     def hashed_password(self):
@@ -131,32 +124,9 @@ class AdminModify(BaseModel):
             raise ValueError("Discord webhook must start with 'https://discord.com'")
         return value
 
-    @field_validator("creation_quota_bytes", mode='before')
-    @classmethod
-    def validate_quota(cls, v):
-        if v is None or v == -1:
-            return v
-        if isinstance(v, float):
-            v = int(v)
-        if isinstance(v, int) and v < 0:
-            raise ValueError("creation_quota_bytes must be a positive integer or null (unlimited)")
-        return v
-
 
 class AdminPartialModify(AdminModify):
     __annotations__ = {k: Optional[v] for k, v in AdminModify.__annotations__.items()}
-
-
-class AdminQuotaResponse(BaseModel):
-    """Quota status for an admin."""
-    admin_username: str
-    is_unlimited: bool
-    quota_limit: Optional[int] = None    # bytes; None = unlimited
-    allocated: int                        # bytes currently allocated across owned users
-    remaining: Optional[int] = None      # bytes still available; None = unlimited
-    usage_percent: Optional[float] = None  # 0–100; None = unlimited
-
-    model_config = ConfigDict(from_attributes=False)
 
 
 class AdminInDB(Admin):

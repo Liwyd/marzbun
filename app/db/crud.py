@@ -14,7 +14,6 @@ from app.db.models import (
     JWT,
     TLS,
     Admin,
-    AdminQuotaLog,
     AdminUsageLogs,
     NextPlan,
     Node,
@@ -30,8 +29,7 @@ from app.db.models import (
     UserTemplate,
     UserUsageResetLogs,
 )
-from app.models.admin import AdminCreate, AdminModify, AdminPartialModify, AdminQuotaResponse
-from app.models.quota import AdminQuotaLogType
+from app.models.admin import AdminCreate, AdminModify, AdminPartialModify
 from app.models.node import NodeCreate, NodeModify, NodeStatus, NodeUsageResponse
 from app.models.proxy import ProxyHost as ProxyHostModify
 from app.models.user import (
@@ -933,9 +931,7 @@ def create_admin(db: Session, admin: AdminCreate) -> Admin:
         hashed_password=admin.hashed_password,
         is_sudo=admin.is_sudo,
         telegram_id=admin.telegram_id if admin.telegram_id else None,
-        discord_webhook=admin.discord_webhook if admin.discord_webhook else None,
-        creation_quota_bytes=admin.creation_quota_bytes,
-        allocated_quota_bytes=0,
+        discord_webhook=admin.discord_webhook if admin.discord_webhook else None
     )
     db.add(dbadmin)
     db.commit()
@@ -964,13 +960,6 @@ def update_admin(db: Session, dbadmin: Admin, modified_admin: AdminModify) -> Ad
         dbadmin.telegram_id = modified_admin.telegram_id
     if modified_admin.discord_webhook:
         dbadmin.discord_webhook = modified_admin.discord_webhook
-    # -1 is sentinel meaning "not provided / leave unchanged"
-    if modified_admin.creation_quota_bytes != -1:
-        dbadmin.creation_quota_bytes = modified_admin.creation_quota_bytes
-        _append_quota_log(
-            db, dbadmin.id, AdminQuotaLogType.quota_adjusted, 0,
-            new_data_limit=modified_admin.creation_quota_bytes,
-        )
 
     db.commit()
     db.refresh(dbadmin)
@@ -998,12 +987,6 @@ def partial_update_admin(db: Session, dbadmin: Admin, modified_admin: AdminParti
         dbadmin.telegram_id = modified_admin.telegram_id
     if modified_admin.discord_webhook is not None:
         dbadmin.discord_webhook = modified_admin.discord_webhook
-    if modified_admin.creation_quota_bytes != -1:
-        dbadmin.creation_quota_bytes = modified_admin.creation_quota_bytes
-        _append_quota_log(
-            db, dbadmin.id, AdminQuotaLogType.quota_adjusted, 0,
-            new_data_limit=modified_admin.creation_quota_bytes,
-        )
 
     db.commit()
     db.refresh(dbadmin)
@@ -1515,173 +1498,3 @@ def count_online_users(db: Session, hours: int = 24):
     query = db.query(func.count(User.id)).filter(User.online_at.isnot(
         None), User.online_at >= twenty_four_hours_ago)
     return query.scalar()
-
-
-# ---------------------------------------------------------------------------
-# Admin Quota Functions
-# ---------------------------------------------------------------------------
-
-class QuotaExceededError(Exception):
-    """Raised when an admin's allocated quota would exceed their limit."""
-    pass
-
-
-class UnlimitedUserQuotaError(Exception):
-    """Raised when a quota-limited admin tries to create an unlimited user."""
-    pass
-
-
-def _effective_data_limit(data_limit: Optional[int]) -> Optional[int]:
-    """Normalize 0 → None (both mean unlimited)."""
-    return data_limit if data_limit else None
-
-
-def get_admin_quota(db: Session, dbadmin: Admin) -> AdminQuotaResponse:
-    """Return quota status for an admin."""
-    limit = dbadmin.creation_quota_bytes
-    allocated = dbadmin.allocated_quota_bytes or 0
-    is_unlimited = limit is None
-
-    return AdminQuotaResponse(
-        admin_username=dbadmin.username,
-        is_unlimited=is_unlimited,
-        quota_limit=limit,
-        allocated=allocated,
-        remaining=None if is_unlimited else max(0, limit - allocated),
-        usage_percent=None if is_unlimited else round(allocated / limit * 100, 2) if limit > 0 else 0.0,
-    )
-
-
-def _lock_admin(db: Session, admin_id: int) -> Optional[Admin]:
-    """Acquire a row-level write lock on the admin row (FOR UPDATE).
-
-    On SQLite the FOR UPDATE clause is silently dropped; since SQLite
-    serialises all writes at the connection level this still prevents
-    concurrent over-allocation in single-process deployments.
-    On MySQL/PostgreSQL this issues a proper row-level lock.
-    """
-    try:
-        return db.query(Admin).filter(Admin.id == admin_id).with_for_update().first()
-    except Exception:
-        return db.query(Admin).filter(Admin.id == admin_id).first()
-
-
-def _append_quota_log(
-    db: Session,
-    admin_id: int,
-    event_type: AdminQuotaLogType,
-    delta_bytes: int,
-    user_id: Optional[int] = None,
-    old_data_limit: Optional[int] = None,
-    new_data_limit: Optional[int] = None,
-) -> None:
-    """Append an immutable audit-log entry (no commit — caller commits)."""
-    db.add(AdminQuotaLog(
-        admin_id=admin_id,
-        user_id=user_id,
-        event_type=event_type,
-        old_data_limit=old_data_limit,
-        new_data_limit=new_data_limit,
-        delta_bytes=delta_bytes,
-        created_at=datetime.utcnow(),
-    ))
-
-
-def check_admin_quota(db: Session, dbadmin: Admin, required_bytes: int) -> None:
-    """Assert dbadmin has enough remaining quota for required_bytes.
-
-    Raises QuotaExceededError when the admin is limited and would go over.
-    No-op for unlimited admins.
-    """
-    if dbadmin.creation_quota_bytes is None:
-        return  # unlimited
-
-    allocated = dbadmin.allocated_quota_bytes or 0
-    available = dbadmin.creation_quota_bytes - allocated
-    if available < required_bytes:
-        raise QuotaExceededError(
-            f"Insufficient quota: {available:,} bytes available, {required_bytes:,} bytes required"
-        )
-
-
-def adjust_admin_quota(
-    db: Session,
-    admin_id: int,
-    delta_bytes: int,
-    event_type: AdminQuotaLogType,
-    user_id: Optional[int] = None,
-    old_data_limit: Optional[int] = None,
-    new_data_limit: Optional[int] = None,
-    commit: bool = True,
-) -> None:
-    """Atomically adjust an admin's allocated_quota_bytes with a row lock.
-
-    Negative delta_bytes releases quota; positive consumes it.
-    Does NOT enforce the quota limit — call check_admin_quota first.
-    """
-    dbadmin = _lock_admin(db, admin_id)
-    if not dbadmin or dbadmin.creation_quota_bytes is None:
-        # Unlimited admins: log the event for audit trail but don't track counter
-        if dbadmin:
-            _append_quota_log(db, admin_id, event_type, delta_bytes, user_id, old_data_limit, new_data_limit)
-        if commit:
-            db.commit()
-        return
-
-    dbadmin.allocated_quota_bytes = max(0, (dbadmin.allocated_quota_bytes or 0) + delta_bytes)
-    _append_quota_log(db, admin_id, event_type, delta_bytes, user_id, old_data_limit, new_data_limit)
-
-    if commit:
-        db.commit()
-
-
-def update_admin_quota_settings(
-    db: Session, dbadmin: Admin, creation_quota_bytes: Optional[int]
-) -> Admin:
-    """Set (or clear) an admin's quota limit (sudo-only operation).
-
-    creation_quota_bytes=None → unlimited.
-    Does not change allocated_quota_bytes.
-    """
-    old_limit = dbadmin.creation_quota_bytes
-    dbadmin.creation_quota_bytes = creation_quota_bytes
-
-    _append_quota_log(
-        db,
-        admin_id=dbadmin.id,
-        event_type=AdminQuotaLogType.quota_adjusted,
-        delta_bytes=0,
-        old_data_limit=old_limit,
-        new_data_limit=creation_quota_bytes,
-    )
-
-    db.commit()
-    db.refresh(dbadmin)
-    return dbadmin
-
-
-def rebuild_admin_quota(db: Session, admin_id: Optional[int] = None) -> Dict[int, int]:
-    """Recalculate allocated_quota_bytes from actual user data_limits.
-
-    Only counts users whose data_limit is finite (> 0).
-    Returns {admin_id: recalculated_bytes} for every admin that was updated.
-    """
-    query = db.query(Admin)
-    if admin_id is not None:
-        query = query.filter(Admin.id == admin_id)
-    # Only rebuild admins that have a quota limit set
-    query = query.filter(Admin.creation_quota_bytes.isnot(None))
-
-    results: Dict[int, int] = {}
-    for admin in query.all():
-        total = db.query(func.sum(User.data_limit)).filter(
-            User.admin_id == admin.id,
-            User.data_limit.isnot(None),
-            User.data_limit > 0,
-        ).scalar() or 0
-
-        admin.allocated_quota_bytes = int(total)
-        results[admin.id] = int(total)
-
-    db.commit()
-    return results

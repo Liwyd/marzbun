@@ -70,9 +70,6 @@ export type UserApi = {
   is_sudo: boolean;
   telegram_id: number | string;
   username: string;
-  // Quota fields (null = unlimited)
-  creation_quota_bytes: number | null;
-  allocated_quota_bytes: number;
 }
 
 export type UseGetUserReturn = {

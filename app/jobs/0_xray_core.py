@@ -4,14 +4,11 @@ import traceback
 from app import app, logger, scheduler, xray
 from app.db import GetDB, crud
 from app.models.node import NodeStatus
-from config import JOB_CORE_HEALTH_CHECK_INTERVAL, XRAY_ENABLED
+from config import JOB_CORE_HEALTH_CHECK_INTERVAL
 from xray_api import exc as xray_exc
 
 
 def core_health_check():
-    if not XRAY_ENABLED:
-        return
-
     config = None
 
     # main core
@@ -39,13 +36,6 @@ def core_health_check():
 
 @app.on_event("startup")
 def start_core():
-    if not XRAY_ENABLED:
-        logger.warning("Xray is disabled (XRAY_ENABLED=False). Skipping Xray core startup.")
-        scheduler.add_job(core_health_check, 'interval',
-                          seconds=JOB_CORE_HEALTH_CHECK_INTERVAL,
-                          coalesce=True, max_instances=1)
-        return
-
     logger.info("Generating Xray core config")
 
     start_time = time.time()

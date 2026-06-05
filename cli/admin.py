@@ -1,4 +1,3 @@
-import re
 from typing import Optional, Union
 
 import typer
@@ -17,58 +16,6 @@ from app.utils.system import readable_size
 from . import utils
 
 app = typer.Typer(no_args_is_help=True)
-
-# Regex for human-readable sizes: e.g. "150GB", "5 TB", "500 mb"
-_SIZE_RE = re.compile(
-    r"^\s*(?P<value>[\d.]+)\s*(?P<unit>[KMGTPE]?B?)\s*$",
-    re.IGNORECASE,
-)
-_SIZE_UNITS = {
-    "b": 1,
-    "kb": 1024,
-    "mb": 1024 ** 2,
-    "gb": 1024 ** 3,
-    "tb": 1024 ** 4,
-    "pb": 1024 ** 5,
-}
-
-
-def parse_quota(value: str) -> Optional[int]:
-    """Parse a human-readable size string into bytes.
-
-    Accepts: 150GB, 5 TB, 500mb, 1024, etc.
-    Returns None for '0', 'unlimited', or empty string.
-    """
-    if not value or value.strip().lower() in ("0", "unlimited", "none", "inf"):
-        return None
-
-    m = _SIZE_RE.match(value)
-    if not m:
-        # Try plain integer (bytes)
-        try:
-            v = int(value.strip())
-            return v if v > 0 else None
-        except ValueError:
-            raise typer.BadParameter(
-                f"Cannot parse quota '{value}'. "
-                "Use formats like '150GB', '5TB', '500MB', or a plain byte count."
-            )
-
-    num = float(m.group("value"))
-    unit = m.group("unit").lower().rstrip("b") + "b"
-    if unit == "b":
-        unit = "b"
-    multiplier = _SIZE_UNITS.get(unit)
-    if multiplier is None:
-        raise typer.BadParameter(f"Unknown unit '{m.group('unit')}'.")
-
-    return int(num * multiplier)
-
-
-def format_quota(bytes_val: Optional[int]) -> str:
-    if bytes_val is None:
-        return "Unlimited"
-    return readable_size(bytes_val)
 
 
 def validate_telegram_id(value: Union[int, str]) -> Union[int, None]:
@@ -111,30 +58,17 @@ def list_admins(
     with GetDB() as db:
         admins: list[Admin] = crud.get_admins(db, offset=offset, limit=limit, username=username)
         utils.print_table(
-            table=Table(
-                "Username", "Usage", "Reseted usage", "Users Usage", "Is sudo",
-                "Quota Limit", "Allocated", "Remaining", "Created at",
-                "Telegram ID", "Discord Webhook",
-            ),
+            table=Table("Username", 'Usage', 'Reseted usage', "Users Usage", "Is sudo",
+                        "Created at", "Telegram ID", "Discord Webhook"),
             rows=[
-                (
-                    str(admin.username),
-                    calculate_admin_usage(admin.id),
-                    calculate_admin_reseted_usage(admin.id),
-                    readable_size(admin.users_usage),
-                    "✔️" if admin.is_sudo else "✖️",
-                    format_quota(admin.creation_quota_bytes),
-                    readable_size(admin.allocated_quota_bytes or 0),
-                    (
-                        "Unlimited" if admin.creation_quota_bytes is None
-                        else readable_size(
-                            max(0, admin.creation_quota_bytes - (admin.allocated_quota_bytes or 0))
-                        )
-                    ),
-                    utils.readable_datetime(admin.created_at),
-                    str(admin.telegram_id or "✖️"),
-                    str(admin.discord_webhook or "✖️"),
-                )
+                (str(admin.username),
+                 calculate_admin_usage(admin.id),
+                 calculate_admin_reseted_usage(admin.id),
+                 readable_size(admin.users_usage),
+                 "✔️" if admin.is_sudo else "✖️",
+                 utils.readable_datetime(admin.created_at),
+                 str(admin.telegram_id or "✖️"),
+                 str(admin.discord_webhook or "✖️"))
                 for admin in admins
             ]
         )
@@ -166,51 +100,26 @@ def delete_admin(
 def create_admin(
     username: str = typer.Option(..., *utils.FLAGS["username"], show_default=False, prompt=True),
     is_sudo: bool = typer.Option(False, *utils.FLAGS["is_sudo"], prompt=True),
-    password: str = typer.Option(
-        ..., prompt=True, confirmation_prompt=True,
-        hide_input=True, hidden=True, envvar=utils.PASSWORD_ENVIRON_NAME,
-    ),
-    telegram_id: str = typer.Option(
-        '', *utils.FLAGS["telegram_id"], prompt="Telegram ID",
-        show_default=False, callback=validate_telegram_id,
-    ),
-    discord_webhook: str = typer.Option(
-        '', *utils.FLAGS["discord_webhook"], prompt=True,
-        show_default=False, callback=validate_discord_webhook,
-    ),
-    quota: Optional[str] = typer.Option(
-        None, "--quota", "-q",
-        help="Creation quota (e.g. 150GB, 5TB, 500MB). Omit or use 'unlimited' for no limit.",
-    ),
+    password: str = typer.Option(..., prompt=True, confirmation_prompt=True,
+                                 hide_input=True, hidden=True, envvar=utils.PASSWORD_ENVIRON_NAME),
+    telegram_id: str = typer.Option('', *utils.FLAGS["telegram_id"], prompt="Telegram ID",
+                                    show_default=False, callback=validate_telegram_id),
+    discord_webhook: str = typer.Option('', *utils.FLAGS["discord_webhook"], prompt=True,
+                                        show_default=False, callback=validate_discord_webhook),
 ):
     """
     Creates an admin
 
     Password can also be set using the `MARZBAN_ADMIN_PASSWORD` environment variable for non-interactive usages.
-
-    Examples:
-      marzban-cli admin create --username alice --quota 150GB
-      marzban-cli admin create --username bob --quota unlimited
     """
-    quota_bytes: Optional[int] = None
-    if quota is not None:
-        try:
-            quota_bytes = parse_quota(quota)
-        except typer.BadParameter as e:
-            utils.error(str(e))
-
     with GetDB() as db:
         try:
-            crud.create_admin(db, AdminCreate(
-                username=username,
-                password=password,
-                is_sudo=is_sudo,
-                telegram_id=telegram_id,
-                discord_webhook=discord_webhook,
-                creation_quota_bytes=quota_bytes,
-            ))
-            quota_display = "Unlimited" if quota_bytes is None else readable_size(quota_bytes)
-            utils.success(f'Admin "{username}" created successfully. Quota: {quota_display}')
+            crud.create_admin(db, AdminCreate(username=username,
+                                              password=password,
+                                              is_sudo=is_sudo,
+                                              telegram_id=telegram_id,
+                                              discord_webhook=discord_webhook))
+            utils.success(f'Admin "{username}" created successfully.')
         except IntegrityError:
             utils.error(f'Admin "{username}" already exists!')
 
@@ -237,44 +146,19 @@ def update_admin(username: str = typer.Option(..., *utils.FLAGS["username"], pro
             hide_input=True
         ) or None
 
-        telegram_id: str = typer.prompt(
-            "Telegram ID (Enter 0 to clear current value)",
-            default=admin.telegram_id or "",
-        )
+        telegram_id: str = typer.prompt("Telegram ID (Enter 0 to clear current value)",
+                                        default=admin.telegram_id or "")
         telegram_id = validate_telegram_id(telegram_id)
 
-        discord_webhook: str = typer.prompt(
-            "Discord webhook (Enter 0 to clear current value)",
-            default=admin.discord_webhook or "",
-        )
+        discord_webhook: str = typer.prompt("Discord webhook (Enter 0 to clear current value)",
+                                            default=admin.discord_webhook or "")
         discord_webhook = validate_discord_webhook(discord_webhook)
-
-        current_quota = (
-            "Unlimited" if admin.creation_quota_bytes is None
-            else readable_size(admin.creation_quota_bytes)
-        )
-        quota_str: str = typer.prompt(
-            f"Creation quota (current: {current_quota}; enter 'unlimited' to remove, e.g. 150GB)",
-            default="" if admin.creation_quota_bytes is None else readable_size(admin.creation_quota_bytes),
-            show_default=False,
-        )
-
-        # -1 = sentinel meaning "leave unchanged"; we always update quota here
-        quota_bytes: Optional[int]
-        if quota_str.strip() == "":
-            quota_bytes = admin.creation_quota_bytes  # unchanged
-        else:
-            try:
-                quota_bytes = parse_quota(quota_str)
-            except typer.BadParameter as e:
-                utils.error(str(e))
 
         return AdminPartialModify(
             is_sudo=is_sudo,
             password=new_password,
             telegram_id=telegram_id,
-            discord_webhook=discord_webhook,
-            creation_quota_bytes=quota_bytes,
+            discord_webhook=discord_webhook
         )
 
     with GetDB() as db:
@@ -340,52 +224,3 @@ def import_from_env(yes_to_all: bool = typer.Option(False, *utils.FLAGS["yes_to_
             f"{updated_user_count} users' admin_id set to the {username}'s id.\n"
             'You must delete SUDO_USERNAME and SUDO_PASSWORD from your env file now.'
         )
-
-
-@app.command(name="quota-rebuild")
-def quota_rebuild(
-    username: Optional[str] = typer.Option(
-        None, *utils.FLAGS["username"],
-        help="Rebuild for a specific admin only. Omit to rebuild all quota-limited admins.",
-    ),
-    yes_to_all: bool = typer.Option(False, *utils.FLAGS["yes_to_all"], help="Skips confirmations"),
-):
-    """
-    Rebuild allocated quota counters from actual user data_limits.
-
-    Use this to repair corrupted counters after direct DB edits, migrations,
-    imports, or any operation that bypassed the normal API.
-
-    Only admins with a creation quota set are affected.
-    """
-    if not yes_to_all and not typer.confirm(
-        "This will recalculate allocated_quota_bytes for all quota-limited admins. Continue?",
-        default=True,
-    ):
-        utils.error("Aborted.")
-
-    with GetDB() as db:
-        admin_id: Optional[int] = None
-        if username:
-            admin = crud.get_admin(db, username=username)
-            if not admin:
-                utils.error(f'Admin "{username}" not found!')
-            if admin.creation_quota_bytes is None:
-                utils.success(f'Admin "{username}" is unlimited — nothing to rebuild.')
-            admin_id = admin.id
-
-        results = crud.rebuild_admin_quota(db, admin_id=admin_id)
-
-        if not results:
-            utils.success("No quota-limited admins found. Nothing to rebuild.")
-
-        Console().print(
-            Panel(
-                "\n".join(
-                    f"  admin_id={aid}  allocated={readable_size(bytes_val)}"
-                    for aid, bytes_val in results.items()
-                ),
-                title="Quota Rebuild Results",
-            )
-        )
-        utils.success(f"Rebuilt quota counters for {len(results)} admin(s).")

@@ -5,11 +5,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 
 from app import logger, xray
-from app.db import Session, crud, get_db, QuotaExceededError, UnlimitedUserQuotaError
-from app.db.crud import _effective_data_limit
+from app.db import Session, crud, get_db
 from app.dependencies import get_expired_users_list, get_validated_user, validate_dates
 from app.models.admin import Admin
-from app.models.quota import AdminQuotaLogType
 from app.models.user import (
     UserCreate,
     UserModify,
@@ -56,36 +54,13 @@ def add_user(
                 detail=f"Protocol {proxy_type} is disabled on your server",
             )
 
-    dbadmin = crud.get_admin(db, admin.username)
-    effective_limit = _effective_data_limit(new_user.data_limit)
-
-    if dbadmin and dbadmin.creation_quota_bytes is not None:
-        # Quota-limited admin: unlimited users are not allowed
-        if effective_limit is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Your admin account has a creation quota. Users with unlimited data are not allowed.",
-            )
-        try:
-            crud.check_admin_quota(db, dbadmin, effective_limit)
-        except QuotaExceededError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
     try:
-        dbuser = crud.create_user(db, new_user, admin=dbadmin)
+        dbuser = crud.create_user(
+            db, new_user, admin=crud.get_admin(db, admin.username)
+        )
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=409, detail="User already exists")
-
-    # Adjust quota after successful creation (within a new transaction)
-    if dbadmin and dbadmin.creation_quota_bytes is not None and effective_limit:
-        crud.adjust_admin_quota(
-            db, dbadmin.id,
-            delta_bytes=effective_limit,
-            event_type=AdminQuotaLogType.user_created,
-            user_id=dbuser.id,
-            new_data_limit=effective_limit,
-        )
 
     bg.add_task(xray.operations.add_user, dbuser=dbuser)
     user = UserResponse.model_validate(dbuser)
@@ -133,42 +108,9 @@ def modify_user(
                 detail=f"Protocol {proxy_type} is disabled on your server",
             )
 
-    # Quota check when data_limit is being changed
-    old_limit = _effective_data_limit(dbuser.data_limit)
-    new_limit = _effective_data_limit(modified_user.data_limit) if modified_user.data_limit is not None else old_limit
-
-    if modified_user.data_limit is not None and new_limit != old_limit:
-        owner_admin = dbuser.admin
-        if owner_admin and owner_admin.creation_quota_bytes is not None:
-            if new_limit is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Your admin account has a creation quota. Users with unlimited data are not allowed.",
-                )
-            delta = (new_limit or 0) - (old_limit or 0)
-            if delta > 0:
-                try:
-                    crud.check_admin_quota(db, owner_admin, delta)
-                except QuotaExceededError as e:
-                    raise HTTPException(status_code=400, detail=str(e))
-
     old_status = dbuser.status
     dbuser = crud.update_user(db, dbuser, modified_user)
     user = UserResponse.model_validate(dbuser)
-
-    # Adjust quota after successful update
-    if modified_user.data_limit is not None and new_limit != old_limit:
-        owner_admin = dbuser.admin
-        if owner_admin and owner_admin.creation_quota_bytes is not None:
-            delta = (new_limit or 0) - (old_limit or 0)
-            crud.adjust_admin_quota(
-                db, owner_admin.id,
-                delta_bytes=delta,
-                event_type=AdminQuotaLogType.user_updated,
-                user_id=dbuser.id,
-                old_data_limit=old_limit,
-                new_data_limit=new_limit,
-            )
 
     if user.status in [UserStatus.active, UserStatus.on_hold]:
         bg.add_task(xray.operations.update_user, dbuser=dbuser)
@@ -203,27 +145,11 @@ def remove_user(
     admin: Admin = Depends(Admin.get_current),
 ):
     """Remove a user"""
-    # Capture quota info before deletion
-    owner_admin = dbuser.admin
-    released_limit = _effective_data_limit(dbuser.data_limit)
-    user_id = dbuser.id
-
     crud.remove_user(db, dbuser)
-
-    # Release quota after deletion
-    if owner_admin and owner_admin.creation_quota_bytes is not None and released_limit:
-        crud.adjust_admin_quota(
-            db, owner_admin.id,
-            delta_bytes=-released_limit,
-            event_type=AdminQuotaLogType.user_deleted,
-            user_id=user_id,
-            old_data_limit=released_limit,
-        )
-
     bg.add_task(xray.operations.remove_user, dbuser=dbuser)
 
     bg.add_task(
-        report.user_deleted, username=dbuser.username, user_admin=Admin.model_validate(owner_admin), by=admin
+        report.user_deleted, username=dbuser.username, user_admin=Admin.model_validate(dbuser.admin), by=admin
     )
 
     logger.info(f'User "{dbuser.username}" deleted')
@@ -399,47 +325,10 @@ def set_owner(
     if not new_admin:
         raise HTTPException(status_code=404, detail="Admin not found")
 
-    old_admin = dbuser.admin
-    user_limit = _effective_data_limit(dbuser.data_limit)
-
-    # Quota check on receiving admin
-    if new_admin.creation_quota_bytes is not None:
-        if user_limit is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Admin \"{new_admin.username}\" has a creation quota. "
-                    "Cannot transfer a user with unlimited data to this admin."
-                ),
-            )
-        try:
-            crud.check_admin_quota(db, new_admin, user_limit)
-        except QuotaExceededError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
     dbuser = crud.set_owner(db, dbuser, new_admin)
     user = UserResponse.model_validate(dbuser)
 
-    # Adjust quotas after transfer
-    if user_limit:
-        if old_admin and old_admin.creation_quota_bytes is not None:
-            crud.adjust_admin_quota(
-                db, old_admin.id,
-                delta_bytes=-user_limit,
-                event_type=AdminQuotaLogType.user_transferred_out,
-                user_id=dbuser.id,
-                old_data_limit=user_limit,
-            )
-        if new_admin.creation_quota_bytes is not None:
-            crud.adjust_admin_quota(
-                db, new_admin.id,
-                delta_bytes=user_limit,
-                event_type=AdminQuotaLogType.user_transferred_in,
-                user_id=dbuser.id,
-                new_data_limit=user_limit,
-            )
-
-    logger.info(f'{user.username} owner successfully set to {admin_username}')
+    logger.info(f'{user.username}"owner successfully set to{admin.username}')
 
     return user
 
@@ -491,25 +380,7 @@ def delete_expired_users(
             status_code=404, detail="No expired users found in the specified date range"
         )
 
-    # Capture quota release info before deletion (group by admin)
-    quota_releases: dict = {}  # admin_id → (admin_obj, total_delta)
-    for u in expired_users:
-        lim = _effective_data_limit(u.data_limit)
-        if lim and u.admin and u.admin.creation_quota_bytes is not None:
-            aid = u.admin.id
-            if aid not in quota_releases:
-                quota_releases[aid] = (u.admin, 0)
-            quota_releases[aid] = (u.admin, quota_releases[aid][1] + lim)
-
     crud.remove_users(db, expired_users)
-
-    # Release quota after bulk deletion
-    for aid, (owner_admin, total_delta) in quota_releases.items():
-        crud.adjust_admin_quota(
-            db, aid,
-            delta_bytes=-total_delta,
-            event_type=AdminQuotaLogType.user_deleted,
-        )
 
     for removed_user in removed_users:
         logger.info(f'User "{removed_user}" deleted')

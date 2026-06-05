@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from app import xray
 from app.db import Session, crud, get_db
 from app.dependencies import get_admin_by_username, validate_admin
-from app.models.admin import Admin, AdminCreate, AdminModify, AdminQuotaResponse, Token
+from app.models.admin import Admin, AdminCreate, AdminModify, Token
 from app.utils import report, responses
 from app.utils.jwt import create_admin_token
 from config import LOGIN_NOTIFY_WHITE_LIST
@@ -189,65 +189,3 @@ def get_admin_usage(
 ):
     """Retrieve the usage of given admin."""
     return dbadmin.users_usage
-
-
-@router.get(
-    "/admin/{username}/quota",
-    response_model=AdminQuotaResponse,
-    responses={403: responses._403, 404: responses._404},
-)
-def get_admin_quota(
-    dbadmin: Admin = Depends(get_admin_by_username),
-    db: Session = Depends(get_db),
-    current_admin: Admin = Depends(Admin.get_current),
-):
-    """Get quota status for an admin.
-
-    Regular admins may only view their own quota.
-    Sudo admins may view any admin's quota.
-    """
-    if not current_admin.is_sudo and current_admin.username != dbadmin.username:
-        raise HTTPException(status_code=403, detail="You're not allowed")
-    return crud.get_admin_quota(db, dbadmin)
-
-
-@router.put(
-    "/admin/{username}/quota",
-    response_model=AdminQuotaResponse,
-    responses={403: responses._403, 404: responses._404},
-)
-def set_admin_quota(
-    quota_bytes: Optional[int],
-    dbadmin: Admin = Depends(get_admin_by_username),
-    db: Session = Depends(get_db),
-    current_admin: Admin = Depends(Admin.check_sudo_admin),
-):
-    """Set or clear an admin's creation quota (sudo only).
-
-    - Pass a positive integer to set a byte limit.
-    - Pass `null` (omit the body or send `null`) to make the admin unlimited.
-    """
-    if quota_bytes is not None and quota_bytes < 0:
-        raise HTTPException(status_code=400, detail="quota_bytes must be a positive integer or null")
-
-    crud.update_admin_quota_settings(db, dbadmin, quota_bytes)
-    return crud.get_admin_quota(db, dbadmin)
-
-
-@router.post(
-    "/admin/{username}/quota/rebuild",
-    response_model=AdminQuotaResponse,
-    responses={403: responses._403, 404: responses._404},
-)
-def rebuild_admin_quota(
-    dbadmin: Admin = Depends(get_admin_by_username),
-    db: Session = Depends(get_db),
-    current_admin: Admin = Depends(Admin.check_sudo_admin),
-):
-    """Recalculate allocated quota from live user data_limits (sudo only).
-
-    Use this to repair the counter after direct DB edits, migrations, or
-    any other operation that may have left the counter inconsistent.
-    """
-    crud.rebuild_admin_quota(db, admin_id=dbadmin.id)
-    return crud.get_admin_quota(db, dbadmin)

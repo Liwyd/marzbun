@@ -29,7 +29,6 @@ from app.models.proxy import (
     ProxyHostSecurity,
     ProxyTypes,
 )
-from app.models.quota import AdminQuotaLogType
 from app.models.user import ReminderType, UserDataLimitResetStrategy, UserStatus
 
 
@@ -47,11 +46,6 @@ class Admin(Base):
     discord_webhook = Column(String(1024), nullable=True, default=None)
     users_usage = Column(BigInteger, nullable=False, default=0)
     usage_logs = relationship("AdminUsageLogs", back_populates="admin")
-    # Quota: NULL = unlimited, positive int = byte limit
-    creation_quota_bytes = Column(BigInteger, nullable=True, default=None)
-    # Running counter of allocated bytes across all owned users with finite data_limit
-    allocated_quota_bytes = Column(BigInteger, nullable=False, default=0, server_default='0')
-    quota_logs = relationship("AdminQuotaLog", back_populates="admin", cascade="all, delete-orphan")
 
 
 class AdminUsageLogs(Base):
@@ -356,22 +350,3 @@ class NotificationReminder(Base):
     threshold = Column(Integer, nullable=True)
     expires_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-
-
-class AdminQuotaLog(Base):
-    """Immutable audit trail for every quota allocation change."""
-    __tablename__ = "admin_quota_logs"
-
-    id = Column(Integer, primary_key=True)
-    admin_id = Column(Integer, ForeignKey("admins.id"), nullable=False, index=True)
-    admin = relationship("Admin", back_populates="quota_logs")
-    # user_id kept as plain int (not FK) so logs survive user deletion
-    user_id = Column(Integer, nullable=True)
-    event_type = Column(Enum(AdminQuotaLogType), nullable=False)
-    # data_limit value before the event (bytes)
-    old_data_limit = Column(BigInteger, nullable=True)
-    # data_limit value after the event (bytes)
-    new_data_limit = Column(BigInteger, nullable=True)
-    # positive = quota consumed, negative = quota released
-    delta_bytes = Column(BigInteger, nullable=False, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)

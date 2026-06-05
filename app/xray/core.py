@@ -32,14 +32,11 @@ class XRayCore:
         atexit.register(lambda: self.stop() if self.started else None)
 
     def get_version(self):
-        try:
-            cmd = [self.executable_path, "version"]
-            output = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode('utf-8')
-            m = re.match(r'^Xray (\d+\.\d+\.\d+)', output)
-            if m:
-                return m.groups()[0]
-        except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
-            return None
+        cmd = [self.executable_path, "version"]
+        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode('utf-8')
+        m = re.match(r'^Xray (\d+\.\d+\.\d+)', output)
+        if m:
+            return m.groups()[0]
 
     def get_x25519(self, private_key: str = None):
         cmd = [self.executable_path, "x25519"]

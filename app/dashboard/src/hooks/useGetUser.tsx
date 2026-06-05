@@ -16,9 +16,7 @@ const useGetUser = (): UseGetUserReturn => {
         discord_webook: "",
         is_sudo: false,
         telegram_id: "",
-        username: "",
-        creation_quota_bytes: null,
-        allocated_quota_bytes: 0,
+        username: ""
       }
     
     return {

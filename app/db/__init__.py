@@ -31,10 +31,7 @@ from .crud import (create_admin, create_notification_reminder,  # noqa
                    get_users_count, remove_admin, remove_user, revoke_user_sub,
                    set_owner, update_admin, update_user, update_user_status, reset_user_by_next,
                    update_user_sub, start_user_expire, get_admin_by_id,
-                   get_admin_by_telegram_id,
-                   get_admin_quota, check_admin_quota, adjust_admin_quota,
-                   update_admin_quota_settings, rebuild_admin_quota,
-                   QuotaExceededError, UnlimitedUserQuotaError)
+                   get_admin_by_telegram_id)
 
 from .models import JWT, System, User  # noqa
 
@@ -67,14 +64,6 @@ __all__ = [
     "create_notification_reminder",
     "get_notification_reminder",
     "delete_notification_reminder",
-
-    "get_admin_quota",
-    "check_admin_quota",
-    "adjust_admin_quota",
-    "update_admin_quota_settings",
-    "rebuild_admin_quota",
-    "QuotaExceededError",
-    "UnlimitedUserQuotaError",
 
     "GetDB",
     "get_db",
